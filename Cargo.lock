@@ -2286,6 +2286,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "jsonwebtoken",
+ "libc",
  "log",
  "nix",
  "notify",
