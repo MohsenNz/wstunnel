@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use std::{fmt, io};
+use std::{fmt, io, thread};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
@@ -654,35 +654,11 @@ impl WsClientConfig {
     }
 }
 
-// #[tokio::main]
-async fn run(s: String) -> Result<(), std::io::Error> {
+async fn run(s: String) -> IoResult<()> {
     // we appended a place holder `_` represent app name as first argument
     let s = format!("_ {s}");
     let substrings: Vec<&str> = s.split_whitespace().collect();
     let args = Wstunnel::parse_from(substrings);
-
-    // Setup logging
-    match &args.commands {
-        // Disable logging if there is a stdio tunnel
-        Commands::Client(args)
-            if args
-                .local_to_remote
-                .iter()
-                .filter(|x| x.local_protocol == LocalProtocol::Stdio)
-                .count()
-                > 0 => {}
-        _ => {
-            let mut env_filter = EnvFilter::builder().parse(&args.log_lvl).expect("Invalid log level");
-            if !(args.log_lvl.contains("h2::") || args.log_lvl.contains("h2=")) {
-                env_filter =
-                    env_filter.add_directive(Directive::from_str("h2::codec=off").expect("Invalid log directive"));
-            }
-            tracing_subscriber::fmt()
-                .with_ansi(args.no_color.is_none())
-                .with_env_filter(env_filter)
-                .init();
-        }
-    }
 
     match args.commands {
         Commands::Client(args) => {
@@ -1204,7 +1180,7 @@ async fn run(s: String) -> Result<(), std::io::Error> {
     tokio::signal::ctrl_c().await
 }
 
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
 #[no_mangle]
@@ -1217,14 +1193,18 @@ pub unsafe extern "C" fn run_wstunnel_blocking(input: *const c_char) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn run_wstunnel_nonblocking(input: *const c_char) -> *mut RtHandle {
+pub unsafe extern "C" fn run_wstunnel_nonblocking(input: *const c_char) -> Box<RtHandle> {
     let c_str = CStr::from_ptr(input);
     let s: String = c_str.to_string_lossy().into_owned();
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let handle = rt.spawn(async { run(s).await.unwrap() });
+    let handle = rt.spawn(async { run(s).await });
+
+    // wait 1 sec to ensure task initialized
+    // otherwise is_wstunnel_running may return true when it's not
+    thread::sleep(Duration::from_secs(1));
 
     let rt_handle = RtHandle { rt, handle };
-    Box::into_raw(Box::new(rt_handle))
+    Box::new(rt_handle)
 }
 
 #[no_mangle]
@@ -1233,7 +1213,40 @@ pub unsafe extern "C" fn stop_wstunnel(input: *mut RtHandle) {
     rt_handle.handle.abort();
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn is_wstunnel_running(input: &RtHandle) -> i32 {
+    if input.handle.is_finished() {
+        0
+    } else {
+        1
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn check_wstunnel_error(input: &mut RtHandle) -> *const c_char {
+    let rt = &input.rt;
+    let handle = &mut input.handle;
+    let empty_str = mk_raw_cstring("");
+    if handle.is_finished() {
+        rt.block_on(async {
+            match handle.await {
+                Err(e) => mk_raw_cstring(&e.to_string()),
+                Ok(Err(e)) => mk_raw_cstring(&e.to_string()),
+                Ok(_) => empty_str,
+            }
+        })
+    } else {
+        empty_str
+    }
+}
+
 pub struct RtHandle {
     pub rt: tokio::runtime::Runtime,
-    pub handle: JoinHandle<()>,
+    pub handle: JoinHandle<IoResult<()>>,
 }
+
+fn mk_raw_cstring(s: &str) -> *mut c_char {
+    CString::new(s).unwrap().into_raw()
+}
+
+type IoResult<T> = Result<T, std::io::Error>;

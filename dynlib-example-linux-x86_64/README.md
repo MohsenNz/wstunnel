@@ -13,6 +13,11 @@ void run_wstunnel_blocking( char *s );
 Handle *run_wstunnel_nonblocking( char *s );
 
 void stop_wstunnel( Handle *h );
+
+int is_wstunnel_running( Handle *h );
+
+// It will return empty string ("") in case of none error
+char *check_wstunnel_error( Handle *h );
 ```
 
 You can pass all CLI arguments as `char *s` e.g:
