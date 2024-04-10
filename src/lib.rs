@@ -1193,50 +1193,47 @@ pub unsafe extern "C" fn run_wstunnel_blocking(input: *const c_char) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn run_wstunnel_nonblocking(input: *const c_char) -> Box<RtHandle> {
+pub unsafe extern "C" fn run_wstunnel_nonblocking(input: *const c_char) -> Box<WstunnelResult> {
     let c_str = CStr::from_ptr(input);
     let s: String = c_str.to_string_lossy().into_owned();
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let handle = rt.spawn(async { run(s).await });
-
-    // wait 1 sec to ensure task initialized
-    // otherwise is_wstunnel_running may return true when it's not
-    thread::sleep(Duration::from_secs(1));
-
-    let rt_handle = RtHandle { rt, handle };
-    Box::new(rt_handle)
+    let res = tokio::runtime::Runtime::new()
+        .map(|rt| {
+            let handle = rt.spawn(async { run(s).await });
+            RtHandle { rt, handle }
+        })
+        .map_err(|e| e.to_string());
+    Box::new(res)
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn stop_wstunnel(input: *mut RtHandle) {
-    let rt_handle = Box::from_raw(input);
-    rt_handle.handle.abort();
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn is_wstunnel_running(input: &RtHandle) -> i32 {
-    if input.handle.is_finished() {
-        0
-    } else {
-        1
+pub unsafe extern "C" fn stop_wstunnel(input: *mut WstunnelResult) {
+    let box_res = Box::from_raw(input);
+    if let Ok(rt_handle) = *box_res {
+        rt_handle.handle.abort()
     }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn check_wstunnel_error(input: &mut RtHandle) -> *const c_char {
-    let rt = &input.rt;
-    let handle = &mut input.handle;
+pub unsafe extern "C" fn is_wstunnel_running(input: &WstunnelResult) -> i32 {
+    match input {
+        Ok(rt_handle) if !rt_handle.handle.is_finished() => 1,
+        _ => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn check_wstunnel_error(input: &mut WstunnelResult) -> *const c_char {
     let empty_str = mk_raw_cstring("");
-    if handle.is_finished() {
-        rt.block_on(async {
+    match input {
+        Ok(RtHandle { rt, ref mut handle }) if handle.is_finished() => rt.block_on(async {
             match handle.await {
                 Err(e) => mk_raw_cstring(&e.to_string()),
                 Ok(Err(e)) => mk_raw_cstring(&e.to_string()),
                 Ok(_) => empty_str,
             }
-        })
-    } else {
-        empty_str
+        }),
+        Err(e) => mk_raw_cstring(e),
+        _ => empty_str,
     }
 }
 
@@ -1250,3 +1247,4 @@ fn mk_raw_cstring(s: &str) -> *mut c_char {
 }
 
 type IoResult<T> = Result<T, std::io::Error>;
+type WstunnelResult = Result<RtHandle, String>;
